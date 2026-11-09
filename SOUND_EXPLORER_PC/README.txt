@@ -1,0 +1,1 @@
+ZIPを展開し、SOUND_EXPLORER_PC.htmlをChromeまたはEdgeで開いてください。
