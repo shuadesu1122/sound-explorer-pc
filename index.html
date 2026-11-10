@@ -2084,6 +2084,7 @@ let formulaPlaybackActive=false;
 let formulaPlaybackTime=0;
 let formulaPlaybackDuration=0;
 let formulaPlaybackSnapshot=null;
+let pcFormulaStart=0,pcFormulaDuration=0,pcFormulaMidi=null,pcFormulaRate=1,pcFormulaWave=null,pcFormulaSource=null;
 function formulaLiveValue(index,t){
  const e=formulaEntries[index];const id=e.title;
  const v=k=>Number(vals[k]??0);
@@ -2126,7 +2127,7 @@ let formulaLastPaint=0;
 function formulaComputation(index,t){
  const entry=formulaEntries[index],id=entry.title,v=k=>Number(vals[k]??0);
  const fmt=(x,d=3)=>Number.isFinite(x)?Number(x).toFixed(d):'—';
- const midi=Number(document.getElementById('note')?.value)||69;
+ const midi=pcFormulaSource!==null&&pcFormulaMidi!==null?pcFormulaMidi:(Number(document.getElementById('note')?.value)||69);
  const ref=440*Math.pow(2,(midi-69)/12);
  const T=v('tension'),D=v('thickness'),f1=ref*Math.sqrt(T/100)/(D/100);
  const n=3, B=(.000035+.00052*v('stiffness')/100)*(D/100)**2/Math.max(.4,T/100);
@@ -2138,7 +2139,8 @@ function formulaComputation(index,t){
  const q=2.28-.0065*v('brightness')-.0026*v('hardness');
  const x=Math.min(.42,Math.max(.06,v('position')/100));
  const contact=v('contact')/1000;
- const sample=lastWave?.out?.length?lastWave.out[Math.min(lastWave.out.length-1,Math.floor(t*lastWave.sr))]:null;
+ const wave=pcFormulaSource&&pcFormulaWave?pcFormulaWave:lastWave;
+ const sample=wave?.out?.length?wave.out[Math.min(wave.out.length-1,Math.floor(t*wave.sr*(pcFormulaSource?pcFormulaRate:1)))]:null;
  const actualSample=sample===null?'—':fmt(sample,5);
  let sub='',value='',note='';
  if(id.startsWith('Attack /')){
@@ -2220,8 +2222,9 @@ function fitVisibleFormulaLines(){
 }
 function updateFormulaReadout(){
  if(category!=='FORMULAS')return;
+ const pcPlaying=pcFormulaSource!==null;
  const playing=formulaPlaybackActive && voices.length>0;
- const t=playing?Math.min(formulaPlaybackDuration,Math.max(0,(performance.now()-playStart)/1000)):formulaPlaybackTime;
+ const t=pcPlaying?Math.min(pcFormulaDuration,Math.max(0,(performance.now()-pcFormulaStart)/1000)):(playing?Math.min(formulaPlaybackDuration,Math.max(0,(performance.now()-playStart)/1000)):formulaPlaybackTime);
  const info=formulaComputation(selectedFormulaIndex,t);
  const sub=document.getElementById('formulaSubstitution');
  const result=document.getElementById('formulaResult');
@@ -2235,7 +2238,7 @@ function animateFormula(){
  formulaAnimationFrame=0;
  if(category!=='FORMULAS')return;
  if(performance.now()-formulaLastPaint>65){updateFormulaReadout();formulaLastPaint=performance.now();}
- if(formulaPlaybackActive && voices.length)formulaAnimationFrame=requestAnimationFrame(animateFormula);
+ if((formulaPlaybackActive && voices.length)||pcFormulaSource!==null)formulaAnimationFrame=requestAnimationFrame(animateFormula);
 }
 function formulaPlaybackStarted(duration){
  formulaPlaybackActive=true;formulaPlaybackTime=0;formulaPlaybackDuration=duration;
@@ -2414,7 +2417,7 @@ function renderFormulaTab(){
  panel.innerHTML=`<div class="formulaSingle formulaMotion"><div class="formulaSingleTitle"><span class="formulaPurpose">${formulaPurpose[entry.title]||entry.title}</span></div><div class="formulaSingleEq">${entry.title.startsWith('Attack /')?'<span class="formulaOneLine">E(t)=(1−e<sup>−<span class="mathfrac"><span>t</span><span>a</span></span></sup>)[s+(1−s)e<sup>−<span class="mathfrac"><span>t</span><span>d</span></span></sup>]e<sup>−<span class="mathfrac"><span>t</span><span>r</span></span></sup></span>' :formulaPrettyMath(entry.title==='Detuning'?'f₊ = f₁ · 2^(0.72c/2400)':entry.title==='Room Size / Reverb'?'y[i] ← y[i] + 0.5·w·y[i−r]':entry.eq)}</div><div class="formulaMeaning">${formulaSymbols[entry.title]||''}</div><div class="formulaSubstitution" id="formulaSubstitution"></div><div class="formulaResult" id="formulaResult"></div></div>`;
  updateFormulaReadout();
  requestAnimationFrame(()=>{fitFormulaToFrame();fitHeroEquation();});
- if(formulaPlaybackActive && !formulaAnimationFrame)formulaAnimationFrame=requestAnimationFrame(animateFormula);
+ if((formulaPlaybackActive||pcFormulaSource!==null) && !formulaAnimationFrame)formulaAnimationFrame=requestAnimationFrame(animateFormula);
  top.querySelector('#formulaPicker').onclick=()=>{
   const old=document.getElementById('formulaMenu');if(old){old.remove();return;}
   const menu=document.createElement('div');menu.id='formulaMenu';menu.className='dropdown';
@@ -2723,6 +2726,17 @@ function playWave(w,key,note,rate=1){
  gain.gain.linearRampToValueAtTime(.48*safeCorrection,now+.007);
  source.connect(gain).connect(master);
  source.start(now);
+ // Keep FORMULAS synchronized with the actual desktop-keyboard note.
+ // No sound generation, graph drawing or keyboard mapping is changed.
+ if(category==='FORMULAS' && !isDrums()){
+   pcFormulaSource=source;pcFormulaStart=performance.now();
+   pcFormulaDuration=w.duration/Math.max(.01,rate);
+   pcFormulaMidi=note===undefined?null:note;
+   pcFormulaRate=rate;pcFormulaWave=w;
+   formulaPlaybackTime=0;
+   updateFormulaReadout();
+   if(!formulaAnimationFrame)formulaAnimationFrame=requestAnimationFrame(animateFormula);
+ }
  const previous=active.get(key);
  if(previous){try{
    previous.gain.gain.cancelScheduledValues(now);
@@ -2731,7 +2745,14 @@ function playWave(w,key,note,rate=1){
    previous.source.stop(now+.014);
  }catch(e){}}
  active.set(key,{source,gain});
- source.onended=()=>{if(active.get(key)?.source===source)active.delete(key)};
+ source.onended=()=>{
+   if(active.get(key)?.source===source)active.delete(key);
+   if(pcFormulaSource===source){
+     formulaPlaybackTime=Math.min(pcFormulaDuration,Math.max(0,(performance.now()-pcFormulaStart)/1000));
+     pcFormulaSource=null;pcFormulaWave=null;pcFormulaMidi=null;
+     updateFormulaReadout();
+   }
+ };
  // The original graphs remain untouched; redraw on preset/parameter changes,
  // not on each key press, because graph rendering delays the next note.
 }
@@ -2763,6 +2784,7 @@ function hit(key){
   // Keep the existing playback path intact.
   const bassTune=preset.value==='bass'?(vals.thickness/100)/Math.sqrt(Math.max(.01,vals.tension/100)):1;
   playWave(w,key,reference,rate*bassTune);
+  if(category==='FORMULAS' && pcFormulaSource!==null)pcFormulaMidi=note;
   status(noteNameOrDrum(note));
  }catch(e){status('発音エラー: '+e.message);console.error(e)}
  document.querySelectorAll('.dkKey').forEach(b=>b.classList.toggle('active',b.dataset.key===key));
