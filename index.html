@@ -3139,7 +3139,7 @@ document.querySelector('.params').addEventListener('change',e=>{
   if(!group||document.getElementById('dkVideoSave'))return;
   const button=document.createElement('button');
   button.id='dkVideoSave';button.type='button';button.textContent='動画保存';
-  button.title='このタブの画面全体と演奏音をWebMで保存';
+  button.title='このタブの画面全体と演奏音をMP4で保存';
   group.appendChild(button);
   let capture=null,videoRecorder=null,parts=[],active=false,stopping=false;
   const cleanup=()=>{
@@ -3170,19 +3170,20 @@ document.querySelector('.params').addEventListener('change',e=>{
       const instrumentTrack=window.__seRecordingBus?.stream?.getAudioTracks()?.[0]||null;
       if(!instrumentTrack)throw new Error('アプリの録音音声を取得できませんでした');
       const combined=new MediaStream([videoTrack,instrumentTrack]);
-      const types=['video/webm;codecs=vp8,opus','video/webm;codecs=vp9,opus','video/webm'];
+      const types=['video/mp4;codecs=avc1.42E01E,mp4a.40.2','video/mp4;codecs=avc1.42E01E','video/mp4'];
       const mimeType=types.find(t=>MediaRecorder.isTypeSupported(t));
-      videoRecorder=new MediaRecorder(combined,mimeType?{mimeType,videoBitsPerSecond:3500000}:undefined);
+      if(!mimeType)throw new Error('このブラウザはMP4録画に対応していません。ChromeまたはEdgeの最新版で開いてください。');
+      videoRecorder=new MediaRecorder(combined,{mimeType,videoBitsPerSecond:3500000});
       parts=[];
       videoRecorder.ondataavailable=e=>{if(e.data?.size)parts.push(e.data)};
       videoRecorder.onerror=e=>{console.error('動画保存エラー',e)};
       videoRecorder.onstop=()=>{
         try{
           if(parts.length){
-            const blob=new Blob(parts,{type:videoRecorder.mimeType||'video/webm'});
+            const blob=new Blob(parts,{type:'video/mp4'});
             const url=URL.createObjectURL(blob);
             const a=document.createElement('a');a.href=url;
-            a.download='SOUND_EXPLORER_'+new Date().toISOString().replace(/[:.]/g,'-')+'.webm';
+            a.download='SOUND_EXPLORER_'+new Date().toISOString().replace(/[:.]/g,'-')+'.mp4';
             document.body.appendChild(a);a.click();a.remove();
             setTimeout(()=>URL.revokeObjectURL(url),60000);
           }
