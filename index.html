@@ -1726,6 +1726,27 @@ function createWave(v){
  let peak=.00001;for(let i=0;i<N;i++)peak=Math.max(peak,Math.abs(out[i]));
  const scale=.65/peak*(v.velocity/75);
  for(let i=0;i<N;i++)out[i]=Math.tanh(out[i]*scale)*.85*(v.volume/75);
+ // GRAND PIANO TIMBRE ONLY: a subtle, short-lived hammer definition and
+ // diffuse soundboard reflections. This is linear-time postprocessing of the
+ // already-created waveform, never a computation on the keydown path.
+ // It does not touch bass/drums, note scheduling, recording, or layout.
+ if(activeTimbre==='piano'){
+   const tap1=Math.round(sr*.0067),tap2=Math.round(sr*.0131);
+   let low=0,previous=0;
+   for(let i=0;i<N;i++){
+     const dry=out[i],t=i/sr;
+     // A transient-only high-frequency accent, fading within 55 ms.
+     low+=.18*(dry-low);
+     const hammer=.12*Math.exp(-t/.027)*(dry-low);
+     // Two weak, non-feedback reflections create a broad wooden body;
+     // their coefficients are small enough to avoid a late swelling tail.
+     const body=i>=tap1?.055*out[i-tap1]:0;
+     const body2=i>=tap2?.029*out[i-tap2]:0;
+     const sample=dry+hammer+body+body2;
+     out[i]=Math.max(-.98,Math.min(.98,sample));
+     previous=dry;
+   }
+ }
  // Ensure the last samples approach silence instead of ending at a nonzero amplitude.
  const fade=Math.min(Math.floor(sr*.65),Math.floor(N*.15));
  for(let i=N-fade;i<N;i++){
@@ -1740,7 +1761,7 @@ function createWave(v){
  }
  return {out,sr,duration,rms};
 }
-function stopSound(){formulaPlaybackStopped();spectrumFinished=true;animating=false;cancelAnimationFrame(animationId);voices.forEach(v=>{try{v.stop()}catch(e){}});voices=[];renderGraphs()}async function playSound(v=vals){try{audioCtx=audioCtx||new (window.AudioContext||window.webkitAudioContext)();await audioCtx.resume();stopSound();spectrumFinished=false;let w=createWave(v),buf=audioCtx.createBuffer(1,w.out.length,w.sr);buf.copyToChannel(w.out,0);let src=audioCtx.createBufferSource(),gain=audioCtx.createGain();src.buffer=buf;let limiter=audioCtx.createDynamicsCompressor();limiter.threshold.value=-21;limiter.knee.value=12;limiter.ratio.value=4;limiter.attack.value=.008;limiter.release.value=.2;src.connect(gain).connect(limiter).connect(audioCtx.destination);gain.gain.value=.52;src.start();voices=[src];lastWave=w;lastWavePosition=0;playStart=performance.now();formulaPlaybackStarted(w.duration);startGraphAnimation();src.onended=()=>{voices=voices.filter(x=>x!==src);if(!voices.length){formulaPlaybackStopped();animating=false;spectrumFinished=true;renderGraphs()}}}catch(e){alert('音声を再生できませんでした: '+e.message)}}$('play').onclick=()=>playSound();$('stop').onclick=stopSound;
+function stopSound(){formulaPlaybackStopped();spectrumFinished=true;animating=false;cancelAnimationFrame(animationId);voices.forEach(v=>{try{v.stop()}catch(e){}});voices=[];renderGraphs()}async function playSound(v=vals){try{audioCtx=audioCtx||new (window.AudioContext||window.webkitAudioContext)();await audioCtx.resume();stopSound();spectrumFinished=false;let w=createWave(v),buf=audioCtx.createBuffer(1,w.out.length,w.sr);buf.copyToChannel(w.out,0);let src=audioCtx.createBufferSource(),gain=audioCtx.createGain();src.buffer=buf;let limiter=audioCtx.createDynamicsCompressor();limiter.threshold.value=-21;limiter.knee.value=12;limiter.ratio.value=4;limiter.attack.value=.008;limiter.release.value=.2;src.connect(gain).connect(limiter).connect(audioCtx.destination);if(window.__seVideoRecording&&window.__seRecordingBus)limiter.connect(window.__seRecordingBus);gain.gain.value=.52;src.start();voices=[src];lastWave=w;lastWavePosition=0;playStart=performance.now();formulaPlaybackStarted(w.duration);startGraphAnimation();src.onended=()=>{voices=voices.filter(x=>x!==src);if(!voices.length){formulaPlaybackStopped();animating=false;spectrumFinished=true;renderGraphs()}}}catch(e){alert('音声を再生できませんでした: '+e.message)}}$('play').onclick=()=>playSound();$('stop').onclick=stopSound;
 // Export the synthesized note as 16-bit PCM WAV; offer native sharing on mobile.
 // OfflineAudioContext resamples the 16 kHz synthesis buffer to 44.1 kHz.
 async function exportWav(){
@@ -2544,8 +2565,10 @@ function setupAudio(){
  limiter.attack.value=.003;limiter.release.value=.12;
  master.connect(limiter);limiter.connect(audio.destination);
  // Capture the same mixed signal that is heard, without microphone permission.
- recorder=audio.createMediaStreamDestination();limiter.connect(recorder);
+ recorder=audio.createMediaStreamDestination();limiter.connect(recorder);window.__seRecordingBus=recorder;
  }
+// Expose only the recording-bus initializer to the separate video-save script.
+window.__seEnsureAudioBus=()=>{setupAudio();return audio;};
 function noteName(midi){return ['C','C♯','D','D♯','E','F','F♯','G','G♯','A','A♯','B'][midi%12]+(Math.floor(midi/12)-1)}
 function drawKeys(){
  const el=$d('dkKeys');el.innerHTML='';
@@ -2673,7 +2696,7 @@ let warmTimer=null;
 function schedulePrewarm(){
  const serial=++warmSerial;
  clearTimeout(warmTimer);
- if(isDrums()){status('演奏できます / OFFLINE');return}
+ if(isDrums()){status('演奏できます');return}
  const center=53+octave*12;
  // The reference note is ready first; additional bass notes retain the original
  // smartphone physical model rather than stretching one waveform across 17 keys.
@@ -2684,13 +2707,13 @@ function schedulePrewarm(){
  const next=()=>{
   if(serial!==warmSerial)return;
   if(pressed.size){warmTimer=setTimeout(next,150);return}
-  if(pos>=notes.length){status('演奏できます / OFFLINE');return}
+  if(pos>=notes.length){status('演奏できます');return}
   const note=notes[pos++],k=cacheKey(note);
   if(!cache.has(k)){
    try{cache.set(k,createCached(note));if(pos===1)anchorNote=note}
    catch(e){status('音色準備エラー: '+e.message);return}
   }
-  status(pos===notes.length?'演奏できます / OFFLINE':'音色を準備しています…');
+  status(pos===notes.length?'演奏できます':'音色を準備しています…');
   // Never perform a whole batch of long physical-model computations at once.
   warmTimer=setTimeout(next,200);
  };
@@ -3099,6 +3122,184 @@ document.querySelector('.params').addEventListener('change',e=>{
  .app{grid-template-rows:49px minmax(0,1fr) 49px 138px!important}
  .transport{height:49px!important;min-height:49px!important}
  .transport #soundPreset,.transport .dkActions button{height:39px!important;min-height:39px!important}
+}
+</style>
+<style id="videoSaveOnlyStyles">
+/* Video save is the fifth button in the existing recording toolbar. */
+@media(min-width:900px){
+ .transport .dkRecordGroup{grid-template-columns:repeat(5,minmax(0,1fr))!important;gap:8px!important}
+ .transport .dkRecordGroup #dkVideoSave{width:100%!important;min-width:0!important;max-width:none!important;height:44px!important;min-height:44px!important;padding:0 3px!important;font-size:clamp(10px,.8vw,12px)!important}
+}
+#dkVideoSave{border:1px solid #333;background:transparent;color:#222;cursor:pointer;white-space:nowrap}
+#dkVideoSave.recording{background:#222;color:#fff}
+</style>
+<script id="videoSaveOnlyFeature">
+(()=>{
+  const group=document.querySelector('.transport .dkRecordGroup');
+  if(!group||document.getElementById('dkVideoSave'))return;
+  const button=document.createElement('button');
+  button.id='dkVideoSave';button.type='button';button.textContent='動画保存';
+  button.title='このタブの画面全体と演奏音をWebMで保存';
+  group.appendChild(button);
+  let capture=null,videoRecorder=null,parts=[],active=false,stopping=false;
+  const cleanup=()=>{
+    if(capture){capture.getTracks().forEach(t=>t.stop());capture=null}
+    active=false;stopping=false;window.__seVideoRecording=false;button.classList.remove('recording');button.textContent='動画保存';
+  };
+  const stop=()=>{
+    if(!active||stopping)return;
+    stopping=true;button.textContent='保存中…';
+    if(videoRecorder&&videoRecorder.state!=='inactive')videoRecorder.stop();else cleanup();
+  };
+  button.addEventListener('click',async()=>{
+    if(active){stop();return}
+    if(!navigator.mediaDevices?.getDisplayMedia||typeof MediaRecorder==='undefined'){
+      alert('動画保存には最新版のChromeまたはEdgeが必要です。');return;
+    }
+    try{
+      // Capture the tab, not the desktop; audio is taken directly from the existing instrument mix.
+      capture=await navigator.mediaDevices.getDisplayMedia({video:{frameRate:30},audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false},systemAudio:'include',surfaceSwitching:'include'});
+      const videoTrack=capture.getVideoTracks()[0];
+      if(!videoTrack)throw new Error('映像を取得できませんでした');
+      // The original instrument creates this destination; no changes to synthesis or playback.
+      const instrumentAudio=window.__seEnsureAudioBus?.();
+      if(instrumentAudio?.state==='suspended')await instrumentAudio.resume();
+      // Capture the app's own Web Audio recording bus, not unreliable tab audio.
+      // This bus already includes keyboard/preset playback; main Play is mirrored
+      // into it only while video recording (without changing speaker output).
+      const instrumentTrack=window.__seRecordingBus?.stream?.getAudioTracks()?.[0]||null;
+      if(!instrumentTrack)throw new Error('アプリの録音音声を取得できませんでした');
+      const combined=new MediaStream([videoTrack,instrumentTrack]);
+      const types=['video/webm;codecs=vp8,opus','video/webm;codecs=vp9,opus','video/webm'];
+      const mimeType=types.find(t=>MediaRecorder.isTypeSupported(t));
+      videoRecorder=new MediaRecorder(combined,mimeType?{mimeType,videoBitsPerSecond:3500000}:undefined);
+      parts=[];
+      videoRecorder.ondataavailable=e=>{if(e.data?.size)parts.push(e.data)};
+      videoRecorder.onerror=e=>{console.error('動画保存エラー',e)};
+      videoRecorder.onstop=()=>{
+        try{
+          if(parts.length){
+            const blob=new Blob(parts,{type:videoRecorder.mimeType||'video/webm'});
+            const url=URL.createObjectURL(blob);
+            const a=document.createElement('a');a.href=url;
+            a.download='SOUND_EXPLORER_'+new Date().toISOString().replace(/[:.]/g,'-')+'.webm';
+            document.body.appendChild(a);a.click();a.remove();
+            setTimeout(()=>URL.revokeObjectURL(url),60000);
+          }
+        }finally{cleanup()}
+      };
+      videoTrack.addEventListener('ended',stop,{once:true});
+      window.__seVideoRecording=true;videoRecorder.start(1000);active=true;stopping=false;
+      button.classList.add('recording');button.textContent='動画終了';
+    }catch(err){console.error(err);cleanup();if(err.name!=='NotAllowedError')alert('動画保存を開始できませんでした: '+err.message)}
+  });
+})();
+</script>
+<style id="videoButtonExactAlignment">
+/* Make all five recording buttons identical in box metrics and border. */
+@media(min-width:900px){
+ .transport .dkRecordGroup{align-items:stretch!important;grid-template-columns:repeat(5,minmax(0,1fr))!important;gap:8px!important}
+ .transport .dkRecordGroup > button,
+ .transport .dkRecordGroup > #dkVideoSave{
+   appearance:none!important;-webkit-appearance:none!important;
+   box-sizing:border-box!important;display:flex!important;align-items:center!important;justify-content:center!important;
+   width:100%!important;min-width:0!important;max-width:none!important;
+   height:44px!important;min-height:0!important;max-height:44px!important;
+   margin:0!important;padding:0 3px!important;
+   border:1px solid #b9b9b5!important;border-radius:0!important;
+   background:transparent;color:#171717;
+   font:normal clamp(10px,.8vw,12px)/1 Arial,sans-serif!important;
+   white-space:nowrap!important;vertical-align:middle!important;
+ }
+}
+@media(min-width:900px) and (max-height:700px){
+ .transport .dkRecordGroup > button,
+ .transport .dkRecordGroup > #dkVideoSave{height:39px!important;max-height:39px!important}
+}
+.transport .dkRecordGroup > #dkVideoSave.recording{background:#222!important;color:white!important}
+</style>
+
+
+<style id="exactGraphFrameToolbarAlignment">
+/* Desktop: match the widths and edges of the two lower graph frames and the right parameter frame. */
+@media (min-width:900px){
+ .transport{
+   grid-template-columns:repeat(2,minmax(0,calc(((100% - 26px) * 0.5581395349 - 12px) / 2))) minmax(0,1fr)!important;
+   column-gap:12px!important; padding:0!important; justify-items:stretch!important;
+ }
+ .transport #soundPreset{grid-column:1!important;width:100%!important;max-width:none!important;justify-self:stretch!important}
+ .transport .dkOctGroup{grid-column:2!important;width:100%!important;justify-self:stretch!important}
+ .transport .dkRecordGroup{grid-column:3!important;width:calc(100% - 14px)!important;margin-left:14px!important;justify-self:stretch!important}
+}
+</style>
+
+<style id="preciseGraphFrameAlignment">
+/* Only position the three existing toolbar groups; preserve all other UI and audio code. */
+@media(min-width:900px){
+ .transport{position:relative!important;display:block!important;padding:0!important;overflow:visible!important}
+ .transport #soundPreset,.transport .dkOctGroup,.transport .dkRecordGroup{
+   position:absolute!important;top:50%!important;transform:translateY(-50%)!important;
+   margin:0!important;box-sizing:border-box!important;justify-self:auto!important;
+ }
+ .transport .dkOctGroup{display:grid!important;grid-template-columns:repeat(2,minmax(0,1fr))!important}
+ .transport .dkRecordGroup{display:grid!important;grid-template-columns:repeat(5,minmax(0,1fr))!important}
+}
+</style>
+<script id="preciseGraphFrameAlignmentScript">
+(()=>{
+ const sync=()=>{
+   if(window.innerWidth<900)return;
+   const bar=document.querySelector('.transport');
+   const left=document.querySelector('.graphs #slot1');
+   const mid=document.querySelector('.graphs #slot2');
+   const right=document.querySelector('.params');
+   const targets=[document.getElementById('soundPreset'),bar?.querySelector('.dkOctGroup'),bar?.querySelector('.dkRecordGroup')];
+   if(!bar||!left||!mid||!right||targets.some(x=>!x))return;
+   const origin=bar.getBoundingClientRect();
+   [left,mid,right].forEach((source,i)=>{
+     const r=source.getBoundingClientRect();
+     const el=targets[i];
+     el.style.setProperty('left',(r.left-origin.left)+'px','important');
+     el.style.setProperty('width',r.width+'px','important');
+     el.style.setProperty('right','auto','important');
+   });
+ };
+ window.addEventListener('resize',sync);
+ if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',sync,{once:true});
+ else sync();
+ requestAnimationFrame(sync);
+})();
+</script>
+<style id="recordButtonsFinalFit">
+/* Keep all five controls inside the graph-aligned right-hand frame. */
+@media (min-width:900px){
+ .transport .dkRecordGroup{
+  display:grid!important;grid-template-columns:repeat(5,minmax(0,1fr))!important;
+  gap:8px!important;min-width:0!important;max-width:none!important;
+  align-items:stretch!important;justify-content:stretch!important;
+  padding:0!important;overflow:visible!important;
+ }
+ .transport .dkRecordGroup > button,
+ .transport .dkRecordGroup > #dkSave,
+ .transport .dkRecordGroup > #dkVideoSave{
+  box-sizing:border-box!important;appearance:none!important;-webkit-appearance:none!important;
+  display:flex!important;align-items:center!important;justify-content:center!important;
+  flex:none!important;width:100%!important;min-width:0!important;max-width:100%!important;
+  height:44px!important;min-height:44px!important;max-height:44px!important;
+  margin:0!important;padding:0 2px!important;
+  border:1px solid #b9b9b5!important;border-radius:0!important;
+  background:transparent!important;color:#171717!important;
+  font:normal clamp(10px,.8vw,12px)/1 Arial,sans-serif!important;
+  white-space:nowrap!important;
+ }
+ .transport .dkRecordGroup > #dkVideoSave.recording{background:#222!important;color:#fff!important}
+}
+@media (min-width:900px) and (max-height:700px){
+ .transport .dkRecordGroup > button,
+ .transport .dkRecordGroup > #dkSave,
+ .transport .dkRecordGroup > #dkVideoSave{
+  height:39px!important;min-height:39px!important;max-height:39px!important;
+ }
 }
 </style>
 </body></html>
